@@ -186,6 +186,8 @@ m.doc() = R"doc(
     py::class_<Wavefunction>(m, "Wavefunction")
         .def(py::init<std::size_t>(), py::arg("n_spatial"))
 
+        .def(py::init<const Wavefunction &>())
+
         .def(py::init<std::size_t, const Wavefunction::Data&>(),
          py::arg("n_spatial"), py::arg("data"))
          
