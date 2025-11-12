@@ -1,0 +1,27 @@
+[build-system]
+requires = ["scikit-build-core>=0.7.0", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "clic-clib" # Use a distinct name on PyPI if you publish
+version = "0.1.0"
+description = "A high-performance C++ backend for Configuration Interaction"
+readme = "README.md" # You should create a README.md for this package
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Basile Herzog", email = "basile.herzog@gmail.com" }]
+dependencies = [
+    "numpy",
+    "scipy",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "License :: OSI Approved :: MIT License",
+]
+
+[tool.scikit-build]
+# CMake is in the same directory as this file
+cmake.source-dir = "."
+# The Python package to include in the wheel is named "clic_clib"
+wheel.packages = ["clic_clib"]
