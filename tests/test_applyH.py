@@ -18,6 +18,27 @@ def calculate_hf_energy_python(h0, U, Ne, Enuc):
     )
     return e1 + 0.5 * e2 + Enuc
 
+def get_rhf_determinant(Nelec, M):
+    """
+    Returns the RHF/ROHF Slater determinant in a spin-blocked MO basis.
+    """
+    if Nelec % 2 == 0:
+    
+        n_occ = Nelec // 2
+        occ_hf = list(range(n_occ))
+
+        return [cc.SlaterDeterminant(M, occ_hf, occ_hf)]
+    else :
+        n_occ = Nelec // 2
+        occ_m = list(range(n_occ))
+        occ_p = list(range(n_occ+1))
+
+        b1 = cc.SlaterDeterminant(M, occ_m, occ_p)
+        b2 = cc.SlaterDeterminant(M, occ_p, occ_m)
+
+        return [b1,b2]
+
+
 
 def test_h2o_fci_energy():
     print("--- Testing FCI Ground State Energy of H2O/STO-3G ---")
@@ -36,22 +57,26 @@ def test_h2o_fci_energy():
     U_alphafirst = np.ascontiguousarray(U_alphafirst_raw, dtype=np.complex128)
 
 
-    # 4. Generate the FCI basis
-    print("\nGenerating FCI basis...")
-    fci_basis = get_fci_basis(M, Ne)
-    print(f"  FCI basis size for ({M}o, {Ne}e) = {len(fci_basis)} determinants.")
+    # 4. Start from HF
+    print("\nGenerating HF basis...")
+    Nelec=10
+    basis = get_rhf_determinant(Ne, M)
+    psi = qc.Wavefunction(M,basis,[1.0])
+
+    maxiter=600
+    toltables = 0
+    tables = qc.build_screened_hamiltonian(h0_alphafirst,U_alphafirst,toltables)
+    tol_el = 0
+    tol_prune = 0
+    for _ in range(maxiter) :
+        psi.normalize()
+        Hpsi = qc.apply_hamiltonian(psi, tables, h0_alphafirst,U_alphafirst,tol_el)
+        electronic_gs_energy = Hpsi.dot(psi)
+        psi = Hpsi
+        psi.prune(tol_prune)
+        basis_ = psi.get_basis()
+        print(f"iter {_}: E0 = {electronic_gs_energy}, len(basis) = {len(basis_)}")
     
-    # 5. Build the full FCI Hamiltonian matrix
-    print("\nBuilding FCI Hamiltonian matrix with C++ kernel...")
-    H_sparse = qc.build_hamiltonian_openmp(fci_basis, h0_alphafirst, U_alphafirst)
-    print(f"  Hamiltonian construction complete. Matrix shape: {H_sparse.shape}")
-    
-    # 6. Diagonalize to find the lowest eigenvalue
-    print("\nDiagonalizing FCI Hamiltonian...")
-    electronic_eigenvalues, _ = eigsh(H_sparse, k=4, which='SA')
-    #electronic_eigenvalues, _ = eigh(H_sparse.toarray())
-    electronic_gs_energy = electronic_eigenvalues[0]
-    print(" lowest 2 : ",electronic_eigenvalues[:2])
     # 7. Calculate total energy and validate
     total_gs_energy = electronic_gs_energy + Enuc
     print(f"\n  Lowest electronic energy = {electronic_gs_energy:.8f} Hartree")

@@ -5,10 +5,11 @@
 // - 0-based indices
 // - AlphaFirst spin-orbital ordering (α: 0..M-1, β: M..2M-1)
 // - Complex-valued one- and two-electron integrals
-// - Exact port of your Julia OO/OS/OD kernels and phase logic
 // -----------------------------------------------------------------------------
 
-#include "ci_core.h"
+//#include "ci_core.h"
+#include "determinants.h"
+#include "wavefunction.h"
 #include <complex>
 #include <vector>
 #include <cstddef>

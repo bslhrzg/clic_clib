@@ -1,7 +1,6 @@
 // determinants.cpp
 #include "determinants.h"
 
-#include <unordered_set>
 #include <bit>          // std::popcount, std::countr_zero
 #include <cassert>
 #include <algorithm>
@@ -9,8 +8,6 @@
 #include <cmath>
 #include <sstream>
 #include <bitset>
-
-#include <omp.h>
 
 namespace ci {
 
@@ -317,6 +314,51 @@ SlaterDeterminant::annihilate(const SlaterDeterminant& s, std::size_t i0, Spin s
     }
 }
 
+// Apply c†_i c_j
+std::optional<SlaterDeterminant::OpResult>
+SlaterDeterminant::apply_excitation_single(const SlaterDeterminant& s, size_t i0, size_t j0,
+                                           Spin spin_i, Spin spin_j,
+                                           SpinOrbitalOrder order) noexcept
+{
+    // Annihilate j first
+    auto r_ann = annihilate(s, j0, spin_j, order);
+    if (!r_ann) return std::nullopt;
+
+    // Create i on the intermediate determinant
+    auto r_cre = create(r_ann->det, i0, spin_i, order);
+    if (!r_cre) return std::nullopt;
+
+    // Combine signs
+    r_cre->sign *= r_ann->sign;
+    return r_cre;
+}
+
+// Apply c†_i c†_j c_l c_k
+std::optional<SlaterDeterminant::OpResult>
+SlaterDeterminant::apply_excitation_double(const SlaterDeterminant& s,
+                                           size_t i0, size_t j0, size_t k0, size_t l0,
+                                           Spin spin_i, Spin spin_j, Spin spin_k, Spin spin_l,
+                                           SpinOrbitalOrder order) noexcept
+{
+    // Apply operators from right to left: c_k, c_l, c†_j, c†_i
+    auto r1 = annihilate(s, k0, spin_k, order);
+    if (!r1) return std::nullopt;
+
+    auto r2 = annihilate(r1->det, l0, spin_l, order);
+    if (!r2) return std::nullopt;
+
+    auto r3 = create(r2->det, j0, spin_j, order);
+    if (!r3) return std::nullopt;
+
+    auto r4 = create(r3->det, i0, spin_i, order);
+    if (!r4) return std::nullopt;
+
+    // Combine all signs
+    r4->sign = r4->sign * r3->sign * r2->sign * r1->sign;
+    return r4;
+}
+
+
 // ========================== Interleave / Deinterleave ========================
 
 Determinant interleave(const SlaterDeterminant& s, SpinOrbitalOrder order)
@@ -375,33 +417,139 @@ SlaterDeterminant deinterleave(const Determinant& d, SpinOrbitalOrder order)
     return SlaterDeterminant(M, occ_a, occ_b);
 }
 
+// ======================= SlaterDeterminant Fast Operators =======================
+
+// Helper to calculate sign for a single creation or annihilation on a SpinDeterminant
+// Returns false if Pauli-blocked.
+inline bool op_sign(const SpinDeterminant& d, size_t i0, bool create, int8_t& sign) {
+    if (create) {
+        if (d.occupied(i0)) return false; // Pauli block
+        const auto N_below = d.raw().popcount_below(i0);
+        sign = (N_below % 2 == 0) ? +1 : -1;
+    } else {
+        if (!d.occupied(i0)) return false; // Pauli block
+        const auto N_below = d.raw().popcount_below(i0);
+        sign = (N_below % 2 == 0) ? +1 : -1;
+    }
+    return true;
+}
+
+// Same-spin excitation: sign is (-1)^C where C is the number of electrons
+// strictly between i and j.
+inline int8_t same_spin_excitation_sign(const SpinDeterminant& d, size_t i0, size_t j0) {
+    size_t p_min = std::min(i0, j0);
+    size_t p_max = std::max(i0, j0);
+    // popcount_below(p_max) counts set bits in [0, p_max-1]
+    // popcount_below(p_min + 1) counts set bits in [0, p_min]
+    // The difference is the number of set bits in [p_min+1, p_max-1]
+    const auto crossings = d.raw().popcount_below(p_max) - d.raw().popcount_below(p_min + 1);
+    return (crossings % 2 == 0) ? +1 : -1;
+}
+
+bool SlaterDeterminant::apply_excitation_single_fast(
+    const SlaterDeterminant& s, size_t i0, size_t j0,
+    Spin spin_i, Spin spin_j, SlaterDeterminant& out, int8_t& sign,
+    SpinOrbitalOrder order) noexcept
+{
+    if (i0 >= s.n_spatial_ || j0 >= s.n_spatial_) return false;
+
+    // Case 1: Same spin sectors (e.g., c_iα† c_jα)
+    if (spin_i == spin_j) {
+        if (i0 == j0) { // Number operator: c_i† c_i
+            const auto& d = (spin_i == Spin::Alpha) ? s.alpha_ : s.beta_;
+            if (!d.occupied(i0)) return false;
+            out = s;
+            sign = 1;
+            return true;
+        }
+        const auto& d_in = (spin_i == Spin::Alpha) ? s.alpha_ : s.beta_;
+        if (!d_in.occupied(j0) || d_in.occupied(i0)) return false; // Pauli
+
+        sign = same_spin_excitation_sign(d_in, i0, j0);
+        out = s;
+        auto& d_out = (spin_i == Spin::Alpha) ? out.alpha_ : out.beta_;
+        d_out.reset(j0);
+        d_out.set(i0);
+        return true;
+    }
+    // Case 2: Different spin sectors (e.g., c_iα† c_jβ)
+    else {
+        auto r_ann = annihilate(s, j0, spin_j, order);
+        if (!r_ann) return false;
+        auto r_cre = create(r_ann->det, i0, spin_i, order);
+        if (!r_cre) return false;
+
+        out = std::move(r_cre->det);
+        sign = r_cre->sign * r_ann->sign;
+        return true;
+    }
+}
+
+bool SlaterDeterminant::apply_excitation_double_fast(
+    const SlaterDeterminant& s, size_t i0, size_t j0, size_t k0, size_t l0,
+    Spin spin_i, Spin spin_j, Spin spin_k, Spin spin_l,
+    SlaterDeterminant& out, int8_t& sign,
+    SpinOrbitalOrder order) noexcept
+{
+    // Apply operators right to left: k, l, j, i
+    // This implementation re-uses the std::optional path for simplicity.
+    // A fully optimized version would pass temporary SpinDeterminants by reference.
+    auto r1 = annihilate(s, k0, spin_k, order);
+    if (!r1) return false;
+
+    auto r2 = annihilate(r1->det, l0, spin_l, order);
+    if (!r2) return false;
+
+    auto r3 = create(r2->det, j0, spin_j, order);
+    if (!r3) return false;
+
+    auto r4 = create(r3->det, i0, spin_i, order);
+    if (!r4) return false;
+
+    out = std::move(r4->det);
+    sign = r4->sign * r3->sign * r2->sign * r1->sign;
+    return true;
+}
+
 } // namespace ci
 
 // ============================== Hashing ======================================
+
 namespace {
 inline std::size_t hash_mix_u64(std::size_t seed, ci::u64 v) noexcept {
+    // splitmix64-ish mix, then combine
+    // avalanche effet
     v ^= v >> 30; v *= 0xbf58476d1ce4e5b9ULL;
     v ^= v >> 27; v *= 0x94d049bb133111ebULL;
     v ^= v >> 31;
     return seed ^ (static_cast<std::size_t>(v) + 0x9e3779b97f4a7c15ULL + (seed<<6) + (seed>>2));
 }
-} // anonymous namespace
+}
 
 std::size_t std::hash<ci::BitsetVec>::operator()(const ci::BitsetVec& b) const noexcept {
+    // Start with a hash of the size, then mix in the words.
     std::size_t seed = std::hash<std::size_t>{}(b.size());
-    for (auto w : b.words()) seed = hash_mix_u64(seed, w);
+    for (auto w : b.words()) {
+        seed = hash_mix_u64(seed, w);
+    }
     return seed;
 }
+
 std::size_t std::hash<ci::Determinant>::operator()(const ci::Determinant& d) const noexcept {
     std::size_t seed = d.num_orbitals();
     for (auto w : d.bits().words()) seed = hash_mix_u64(seed, w);
     return seed;
 }
+
+
 std::size_t std::hash<ci::SpinDeterminant>::operator()(const ci::SpinDeterminant& sd) const noexcept {
+    // This now correctly depends on ALL data within the bitset.
     return std::hash<ci::BitsetVec>{}(sd.raw());
 }
+
 std::size_t std::hash<ci::SlaterDeterminant>::operator()(const ci::SlaterDeterminant& s) const noexcept {
     std::size_t h_alpha = std::hash<ci::SpinDeterminant>{}(s.alpha());
     std::size_t h_beta  = std::hash<ci::SpinDeterminant>{}(s.beta());
+    // Combine them. The way you do it is a standard technique.
     return h_alpha ^ (h_beta + 0x9e3779b97f4a7c15ULL + (h_alpha << 6) + (h_alpha >> 2));
 }

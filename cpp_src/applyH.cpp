@@ -137,7 +137,7 @@ Wavefunction apply_hamiltonian(
         
         Determinant d_in_comb(K, occ_so_vec);
         SlaterDeterminant det_out_scratch(M);
-        int8_t sign; // FIX 2: Declare a proper sign variable
+        int8_t sign; 
 
         // 1) Diagonal
         cx val_diag = KL(d_in_comb, d_in_comb, H, V);
@@ -155,12 +155,12 @@ Wavefunction apply_hamiltonian(
                         det_in, p % M, r % M,
                         p < M ? Spin::Alpha : Spin::Beta,
                         r < M ? Spin::Alpha : Spin::Beta,
-                        det_out_scratch, sign)) { // FIX 2: Pass the sign variable
+                        det_out_scratch, sign)) { 
 
                     if (seen.count(det_out_scratch)) continue;
                     seen.insert(det_out_scratch);
 
-                    Determinant d_out_comb = combined_from(det_out_scratch); // FIX 1: Now works
+                    Determinant d_out_comb = combined_from(det_out_scratch); 
                     cx val = KL(d_in_comb, d_out_comb, H, V);
                     if (std::abs(val) > 0) acc[det_out_scratch] += coeff * val;
                 }
@@ -184,12 +184,11 @@ Wavefunction apply_hamiltonian(
                         det_in, p % M, r % M,
                         p < M ? Spin::Alpha : Spin::Beta,
                         r < M ? Spin::Alpha : Spin::Beta,
-                        det_out_scratch, sign)) { // FIX 2: Pass the sign variable
-
+                        det_out_scratch, sign)) { 
                     if (seen.count(det_out_scratch)) continue;
                     seen.insert(det_out_scratch);
 
-                    Determinant d_out_comb = combined_from(det_out_scratch); // FIX 1: Now works
+                    Determinant d_out_comb = combined_from(det_out_scratch); 
                     cx val = KL(d_in_comb, d_out_comb, H, V);
                     if (std::abs(val) > 0) acc[det_out_scratch] += coeff * val;
                 }
@@ -213,12 +212,12 @@ Wavefunction apply_hamiltonian(
                             det_in, p % M, q % M, r % M, s % M,
                             p < M ? Spin::Alpha : Spin::Beta, q < M ? Spin::Alpha : Spin::Beta,
                             r < M ? Spin::Alpha : Spin::Beta, s < M ? Spin::Alpha : Spin::Beta,
-                            det_out_scratch, sign)) { // FIX 2: Pass the sign variable
+                            det_out_scratch, sign)) { 
                         
                         if (seen.count(det_out_scratch)) continue;
                         seen.insert(det_out_scratch);
 
-                        Determinant d_out_comb = combined_from(det_out_scratch); // FIX 1: Now works
+                        Determinant d_out_comb = combined_from(det_out_scratch); 
                         cx val = KL(d_in_comb, d_out_comb, H, V);
                         if (std::abs(val) > 0) acc[det_out_scratch] += coeff * val;
                     }
@@ -244,6 +243,149 @@ Wavefunction apply_hamiltonian(
     }
     return out;
 }
+
+std::vector<SlaterDeterminant> get_connected_basis(
+    const Wavefunction& psi,
+    const ScreenedHamiltonian& sh)
+{
+    // We only need a set to store the unique determinants we find.
+    using Set = std::unordered_set<SlaterDeterminant>;
+
+    const size_t M = psi.num_spatial_orbitals();
+    const size_t K = sh.n_spin_orbitals;
+
+    // Flatten the input wavefunction for parallel processing.
+    std::vector<SlaterDeterminant> basis_in;
+    basis_in.reserve(psi.data().size());
+    for (const auto& kv : psi.data()) {
+        basis_in.push_back(kv.first);
+    }
+
+    int T = 1;
+    #ifdef _OPENMP
+    T = omp_get_max_threads();
+    #endif
+    // Each thread will have its own local set to avoid locking.
+    std::vector<Set> local_sets(T);
+
+    #pragma omp parallel for schedule(dynamic)
+    for (size_t item_idx = 0; item_idx < basis_in.size(); ++item_idx) {
+        int tid = 0;
+        #ifdef _OPENMP
+        tid = omp_get_thread_num();
+        #endif
+        auto& acc_set = local_sets[tid]; // Accumulate into the thread's local set
+        const auto& det_in = basis_in[item_idx];
+
+        // This is still useful to avoid inserting the same new determinant
+        // multiple times if it's generated from the same det_in.
+        std::unordered_set<SlaterDeterminant> seen;
+        
+        std::vector<int> occ_so_vec;
+        occ_so_vec.reserve(K);
+        for (auto it = det_in.alpha().begin_occ(); it != det_in.alpha().end_occ(); ++it) occ_so_vec.push_back(*it);
+        for (auto it = det_in.beta().begin_occ(); it != det_in.beta().end_occ(); ++it) occ_so_vec.push_back(*it + static_cast<int>(M));
+        std::sort(occ_so_vec.begin(), occ_so_vec.end());
+        std::unordered_set<int> occ_so_set(occ_so_vec.begin(), occ_so_vec.end());
+        
+        SlaterDeterminant det_out_scratch(M);
+        int8_t sign; 
+
+        // 1) Diagonal: The determinant is always connected to itself.
+        acc_set.insert(det_in);
+        seen.insert(det_in);
+
+
+        // 2) Singles from Sh0
+        for (int r : occ_so_vec) {
+            auto it = sh.sh0.find(r);
+            if (it == sh.sh0.end()) continue;
+            for (uint32_t p : it->second) {
+                if (occ_so_set.count(p)) continue; 
+
+                if (SlaterDeterminant::apply_excitation_single_fast(
+                        det_in, p % M, r % M,
+                        p < M ? Spin::Alpha : Spin::Beta,
+                        r < M ? Spin::Alpha : Spin::Beta,
+                        det_out_scratch, sign)) { 
+
+                    if (seen.count(det_out_scratch)) continue;
+                    seen.insert(det_out_scratch);
+                    acc_set.insert(det_out_scratch);
+                }
+            }
+        }
+
+        // 3) Singles from SU
+        for (int r : occ_so_vec) {
+            auto it_r = sh.su.find(r);
+            if (it_r == sh.su.end()) continue;
+            for (const auto& [p, spectators] : it_r->second) {
+                if (occ_so_set.count(p)) continue; 
+
+                bool spectator_ok = false;
+                for (uint32_t s : spectators) {
+                    if (occ_so_set.count(s)) { spectator_ok = true; break; }
+                }
+                if (!spectator_ok) continue;
+
+                if (SlaterDeterminant::apply_excitation_single_fast(
+                        det_in, p % M, r % M,
+                        p < M ? Spin::Alpha : Spin::Beta,
+                        r < M ? Spin::Alpha : Spin::Beta,
+                        det_out_scratch, sign)) { 
+                    if (seen.count(det_out_scratch)) continue;
+                    seen.insert(det_out_scratch);
+                    acc_set.insert(det_out_scratch);
+                }
+            }
+        }
+
+        // 4) Doubles from D
+        for (size_t i = 0; i < occ_so_vec.size(); ++i) {
+            for (size_t j = i + 1; j < occ_so_vec.size(); ++j) {
+                uint32_t r = occ_so_vec[i];
+                uint32_t s = occ_so_vec[j];
+                uint64_t key_rs = r | (static_cast<uint64_t>(s) << 32);
+
+                auto it = sh.d.find(key_rs);
+                if (it == sh.d.end()) continue;
+
+                for (const auto& [p, q] : it->second) {
+                    if (occ_so_set.count(p) || occ_so_set.count(q)) continue;
+
+                    if (SlaterDeterminant::apply_excitation_double_fast(
+                            det_in, p % M, q % M, r % M, s % M,
+                            p < M ? Spin::Alpha : Spin::Beta, q < M ? Spin::Alpha : Spin::Beta,
+                            r < M ? Spin::Alpha : Spin::Beta, s < M ? Spin::Alpha : Spin::Beta,
+                            det_out_scratch, sign)) { 
+                        
+                        if (seen.count(det_out_scratch)) continue;
+                        seen.insert(det_out_scratch);
+                        acc_set.insert(det_out_scratch);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Merge results from all threads ---
+    Set final_set;
+    size_t hint = 0;
+    for(const auto& s : local_sets) hint += s.size();
+    final_set.reserve(hint);
+
+    for (const auto& s : local_sets) {
+        final_set.insert(s.begin(), s.end());
+    }
+
+    // Convert the final set to a sorted vector for a canonical representation.
+    std::vector<SlaterDeterminant> connected_basis(final_set.begin(), final_set.end());
+    std::sort(connected_basis.begin(), connected_basis.end());
+    
+    return connected_basis;
+}
+
 
 // ============================
 // New fixed basis support
@@ -480,322 +622,6 @@ Wavefunction apply_hamiltonian_fixed_basis(
     Wavefunction out(M);
     for (const auto& kv : final_acc) out.add_term(kv.first, kv.second, tol_element);
     return out;
-}
-
-
-// =============================
-// Direct sparse Ham
-// =============================
-
-
-// local helper
-static inline uint64_t pack_rs(uint32_t r, uint32_t s) {
-    if (r < s) return r | (uint64_t(s) << 32);
-    return s | (uint64_t(r) << 32);
-}
-
-FixedBasisCSR build_fixed_basis_csr(
-    const ScreenedHamiltonian& sh_fb,
-    const std::vector<SlaterDeterminant>& basis,
-    const H1View& H,
-    const ERIView& V)
-{
-    const size_t N = basis.size();
-    if (N == 0) return FixedBasisCSR{0, {0}, {}, {}};
-
-    const size_t M = basis.front().num_spatial_orbitals();
-    const size_t K = 2 * M;
-
-    // map det -> index
-    std::unordered_map<SlaterDeterminant, int> idx;
-    idx.reserve(N * 2);
-    for (int i = 0; i < (int)N; ++i) idx.emplace(basis[i], i);
-
-    // precompute combined and occupied spin orbitals
-    std::vector<Determinant> Dcomb(N, Determinant(K));
-    std::vector<std::vector<int>> occ_so(N);
-    for (size_t i = 0; i < N; ++i) {
-        Dcomb[i] = combined_from(basis[i]);
-        auto& v = occ_so[i];
-        v.reserve(K);
-        for (auto it = basis[i].alpha().begin_occ(); it != basis[i].alpha().end_occ(); ++it) v.push_back(*it);
-        for (auto it = basis[i].beta().begin_occ();  it != basis[i].beta().end_occ();  ++it) v.push_back(*it + int(M));
-        std::sort(v.begin(), v.end());
-    }
-
-    int T = 1;
-    #ifdef _OPENMP
-    T = omp_get_max_threads();
-    #endif
-    std::vector<std::vector<int64_t>> t_rows(T), t_cols(T);
-    std::vector<std::vector<cx>>      t_vals(T);
-
-    #pragma omp parallel for schedule(dynamic)
-    for (int ii = 0; ii < (int)N; ++ii) {
-        int tid = 0;
-        #ifdef _OPENMP
-        tid = omp_get_thread_num();
-        #endif
-        auto& rows = t_rows[tid];
-        auto& cols = t_cols[tid];
-        auto& vals = t_vals[tid];
-
-        const auto& Di = Dcomb[ii];
-        const auto& oi = occ_so[ii];
-        std::unordered_set<int> oi_set(oi.begin(), oi.end());
-
-        // NEW: prevent double counting the same neighbor |Dj> from different tables
-        std::unordered_set<int> seen_cols;
-        seen_cols.reserve(64);
-        seen_cols.insert(ii); // diagonal
-
-        // diagonal
-        {
-            cx hii = KL(Di, Di, H, V);
-            if (std::abs(hii) > 0) {
-                rows.push_back(ii); cols.push_back(ii); vals.push_back(hii);
-            }
-        }
-
-        SlaterDeterminant tmp(M);
-        int8_t sign = 1;
-
-        // singles via Sh0
-        for (int r : oi) {
-            auto it = sh_fb.sh0.find((uint32_t)r);
-            if (it == sh_fb.sh0.end()) continue;
-            for (uint32_t p : it->second) {
-                if (oi_set.count((int)p)) continue;
-
-                if (SlaterDeterminant::apply_excitation_single_fast(
-                        basis[ii], p % M, r % M,
-                        p < M ? Spin::Alpha : Spin::Beta,
-                        r < M ? Spin::Alpha : Spin::Beta,
-                        tmp, sign))
-                {
-                    auto jt = idx.find(tmp);
-                    if (jt == idx.end()) continue;
-                    int jj = jt->second;
-                    if (jj < ii) continue;
-                    if (seen_cols.count(jj)) continue;            // <-- guard
-                    seen_cols.insert(jj);
-
-                    Determinant Dj = Di;
-                    Dj.reset((size_t)r);
-                    Dj.set((size_t)p);
-
-                    cx hij = KL(Di, Dj, H, V);
-                    if (std::abs(hij) > 0) {
-                        rows.push_back(ii); cols.push_back(jj); vals.push_back(hij);
-                        if (jj != ii) {
-                            rows.push_back(jj); cols.push_back(ii); vals.push_back(std::conj(hij));
-                        }
-                    }
-                }
-            }
-        }
-
-        // singles via SU
-        for (int r : oi) {
-            auto it_r = sh_fb.su.find((uint32_t)r);
-            if (it_r == sh_fb.su.end()) continue;
-
-            for (const auto& [p, spectators] : it_r->second) {
-                if (oi_set.count((int)p)) continue;
-
-                bool ok = false;
-                for (uint32_t s : spectators) { if (oi_set.count((int)s)) { ok = true; break; } }
-                if (!ok) continue;
-
-                if (SlaterDeterminant::apply_excitation_single_fast(
-                        basis[ii], p % M, r % M,
-                        p < M ? Spin::Alpha : Spin::Beta,
-                        r < M ? Spin::Alpha : Spin::Beta,
-                        tmp, sign))
-                {
-                    auto jt = idx.find(tmp);
-                    if (jt == idx.end()) continue;
-                    int jj = jt->second;
-                    if (jj < ii) continue;
-                    if (seen_cols.count(jj)) continue;            // <-- guard
-                    seen_cols.insert(jj);
-
-                    Determinant Dj = Di;
-                    Dj.reset((size_t)r);
-                    Dj.set((size_t)p);
-
-                    cx hij = KL(Di, Dj, H, V);
-                    if (std::abs(hij) > 0) {
-                        rows.push_back(ii); cols.push_back(jj); vals.push_back(hij);
-                        if (jj != ii) {
-                            rows.push_back(jj); cols.push_back(ii); vals.push_back(std::conj(hij));
-                        }
-                    }
-                }
-            }
-        }
-
-        // doubles via D
-        for (size_t a = 0; a < oi.size(); ++a) {
-            for (size_t b = a + 1; b < oi.size(); ++b) {
-                uint32_t r = (uint32_t)oi[a], s = (uint32_t)oi[b];
-                uint64_t key = (r < s) ? (r | (uint64_t(s) << 32)) : (s | (uint64_t(r) << 32));
-                auto it = sh_fb.d.find(key);
-                if (it == sh_fb.d.end()) continue;
-
-                for (const auto& [p, q] : it->second) {
-                    if (oi_set.count((int)p) || oi_set.count((int)q)) continue;
-
-                    if (SlaterDeterminant::apply_excitation_double_fast(
-                            basis[ii], p % M, q % M, r % M, s % M,
-                            p < M ? Spin::Alpha : Spin::Beta, q < M ? Spin::Alpha : Spin::Beta,
-                            r < M ? Spin::Alpha : Spin::Beta, s < M ? Spin::Alpha : Spin::Beta,
-                            tmp, sign))
-                    {
-                        auto jt = idx.find(tmp);
-                        if (jt == idx.end()) continue;
-                        int jj = jt->second;
-                        if (jj < ii) continue;
-                        if (seen_cols.count(jj)) continue;        // <-- guard (paranoid but safe)
-                        seen_cols.insert(jj);
-
-                        Determinant Dj = Di;
-                        Dj.reset((size_t)r); Dj.reset((size_t)s);
-                        Dj.set((size_t)p);   Dj.set((size_t)q);
-
-                        cx hij = KL(Di, Dj, H, V);
-                        if (std::abs(hij) > 0) {
-                            rows.push_back(ii); cols.push_back(jj); vals.push_back(hij);
-                            if (jj != ii) {
-                                rows.push_back(jj); cols.push_back(ii); vals.push_back(std::conj(hij));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-
-    // merge thread-local COO and convert to CSR
-    size_t nnz = 0;
-    for (int t = 0; t < T; ++t) nnz += t_vals[t].size();
-
-    std::vector<int64_t> rows; rows.reserve(nnz);
-    std::vector<int32_t> cols; cols.reserve(nnz);
-    std::vector<cx>      vals; vals.reserve(nnz);
-    for (int t = 0; t < T; ++t) {
-        rows.insert(rows.end(), t_rows[t].begin(), t_rows[t].end());
-        cols.insert(cols.end(), t_cols[t].begin(), t_cols[t].end());
-        vals.insert(vals.end(), t_vals[t].begin(), t_vals[t].end());
-    }
-
-    // sort by (row, col)
-    std::vector<size_t> order(rows.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b){
-        if (rows[a] != rows[b]) return rows[a] < rows[b];
-        return cols[a] < cols[b];
-    });
-
-    FixedBasisCSR A;
-    A.N = N;
-    A.indptr.assign(N + 1, 0);
-
-    int64_t cur_row = -1;
-    int32_t cur_col = -1;
-    cx      acc     = cx(0.0, 0.0);
-
-    auto flush = [&](int64_t r, int32_t c, cx v) {
-        if (std::abs(v) == 0) return;
-        A.indices.push_back(c);
-        A.data.push_back(v);
-        ++A.indptr[r + 1];
-    };
-
-    for (size_t k = 0; k < order.size(); ++k) {
-        size_t i = order[k];
-        int64_t r = rows[i];
-        int32_t c = cols[i];
-        cx v = vals[i];
-
-        if (r != cur_row || c != cur_col) {
-            if (cur_row >= 0) flush(cur_row, cur_col, acc);
-            cur_row = r; cur_col = c; acc = v;
-        } else {
-            acc += v;
-        }
-    }
-    if (cur_row >= 0) flush(cur_row, cur_col, acc);
-
-    // prefix sum
-    for (size_t r = 0; r < N; ++r) A.indptr[r + 1] += A.indptr[r];
-
-    return A;
-}
-
-void csr_matvec(const FixedBasisCSR& A, const cx* x, cx* y) {
-    const size_t N = A.N;
-    #pragma omp parallel for schedule(static)
-    for (ptrdiff_t i = 0; i < (ptrdiff_t)N; ++i) {
-        cx sum = cx(0.0, 0.0);
-        const auto start = A.indptr[i];
-        const auto end   = A.indptr[i + 1];
-        for (auto k = start; k < end; ++k) sum += A.data[k] * x[A.indices[k]];
-        y[i] = sum;
-    }
-}
-
-
-
-FixedBasisCSR build_fixed_basis_csr_full(
-    const std::vector<SlaterDeterminant>& basis,
-    size_t M,
-    const H1View& H,
-    const ERIView& V,
-    double tol_tables,
-    double drop_tol)
-{
-    const size_t K = 2 * M;
-
-    // 1) Full screened tables (complete adjacency within tol_tables)
-    ScreenedHamiltonian sh_full = build_screened_hamiltonian(K, H, V, tol_tables);
-
-    // 2) Restrict to fixed-basis orbitals
-    ScreenedHamiltonian sh_fb = build_fixed_basis_tables(sh_full, basis, M);
-
-    // 3) Build CSR
-    FixedBasisCSR A = build_fixed_basis_csr(sh_fb, basis, H, V);
-
-    // 4) Optional pruning of tiny entries (keeps Hermiticity because we stored symmetrically)
-    if (drop_tol > 0.0) {
-        const size_t N = A.N;
-        std::vector<int64_t> new_indptr(N + 1, 0);
-        std::vector<int32_t> new_indices;
-        std::vector<cx>      new_data;
-        new_indices.reserve(A.indices.size());
-        new_data.reserve(A.data.size());
-
-        for (size_t i = 0; i < N; ++i) {
-            const auto start = A.indptr[i];
-            const auto end   = A.indptr[i + 1];
-            for (auto k = start; k < end; ++k) {
-                const cx v = A.data[k];
-                if (std::abs(v) > drop_tol) {
-                    new_indices.push_back(A.indices[k]);
-                    new_data.push_back(v);
-                    ++new_indptr[i + 1];
-                }
-            }
-        }
-        for (size_t i = 0; i < N; ++i) new_indptr[i + 1] += new_indptr[i];
-
-        A.indices.swap(new_indices);
-        A.data.swap(new_data);
-        A.indptr.swap(new_indptr);
-    }
-
-    return A;
 }
 
 

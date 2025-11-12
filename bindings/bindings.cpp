@@ -5,7 +5,10 @@
 #include <pybind11/complex.h>
 #include <pybind11/stl_bind.h>
 
-#include "ci_core.h"
+// #include "ci_core.h"
+#include "determinants.h"
+#include "wavefunction.h"
+#include "nbody.h"
 #include "slater_condon.h"
 #include "hamiltonian.h"
 #include "ed_tools.h"
@@ -117,7 +120,7 @@ m.doc() = R"doc(
     High-performance C++ backend for Configuration Interaction (CI) calculations.
 
     This library provides core data structures for representing Slater determinants
-    and wavefunctions, efficient C++ kernels for applying operators and building
+    and wavefunction, efficient C++ kernels for applying operators and building
     Hamiltonian matrices using Slater-Condon rules, and tools for dynamic
     operator application.
 )doc";
@@ -239,7 +242,7 @@ m.doc() = R"doc(
             return wf.data().find(det) != wf.data().end();
         }, py::arg("det"));
 
-    // --- Wavefunction Operator Functions (MODIFIED SECTION) ---
+    // --- Wavefunction Operator Functions ---
     // Use lambdas to convert Python list of tuples to C++ vector of structs
     m.def("apply_one_body_operator",
           [](const Wavefunction& wf, const std::vector<std::tuple<size_t, size_t, Spin, Spin, Wavefunction::Coeff>>& term_tuples) {
@@ -325,12 +328,21 @@ m.doc() = R"doc(
         [](const Wavefunction& psi, const ScreenedHamiltonian& sh, py::array H, py::array V, double tol_element) {
             return apply_hamiltonian(psi, sh, make_H1(H), make_ERI(V), tol_element);
         },
-        py::arg("psi"), py::arg("screened_H"), py::arg("H"), py::arg("V"), py::arg("tol_element"),
+        py::arg("psi"), py::arg("screened_h0U"), py::arg("H"), py::arg("V"), py::arg("tol_element"),
         R"doc(
         Applies the Hamiltonian to a wavefunction using pre-built screening tables.
-        This is a direct C++ translation of the proven Python `apply_H_on_det` logic,
-        applied to each determinant in the input wavefunction.
         )doc");
+
+    m.def("get_connected_basis",
+        [](const Wavefunction& psi, const ScreenedHamiltonian& sh){
+            return get_connected_basis(psi,sh);
+
+        },
+        py::arg("psi"), py::arg("screened_h0U"),
+        R"doc(
+        Using pre-built screening tables of h0U, get the connected basis to psi given the hamiltonian
+        )doc");
+
 
     // --- fixed-basis: build fixed-basis tables ---
     m.def("build_fixed_basis_tables",
@@ -393,106 +405,6 @@ m.doc() = R"doc(
         together with `build_fixed_basis_tables`.
         )doc"
     );
-
-
-    // Expose FixedBasisCSR and builders
-    py::class_<ci::FixedBasisCSR>(m, "FixedBasisCSR")
-        .def_property_readonly("N", [](const ci::FixedBasisCSR& A){ return A.N; })
-        .def_property_readonly("nnz", [](const ci::FixedBasisCSR& A){ return (int64_t)A.data.size(); })
-        .def_property_readonly("indptr", [](const ci::FixedBasisCSR& A){
-            return py::array_t<int64_t>(A.indptr.size(), A.indptr.data());
-        })
-        .def_property_readonly("indices", [](const ci::FixedBasisCSR& A){
-            return py::array_t<int32_t>(A.indices.size(), A.indices.data());
-        })
-        .def_property_readonly("data", [](const ci::FixedBasisCSR& A){
-            return py::array_t<std::complex<double>>(A.data.size(), reinterpret_cast<const std::complex<double>*>(A.data.data()));
-        });
-
-    m.def("build_fixed_basis_csr",
-        [](const ci::ScreenedHamiltonian& sh_fb,
-        const std::vector<ci::SlaterDeterminant>& basis,
-        py::array H, py::array V)
-        {
-            return ci::build_fixed_basis_csr(sh_fb, basis, make_H1(H), make_ERI(V));
-        },
-        py::arg("screened_H_fixed_basis"),
-        py::arg("basis"),
-        py::arg("H"), py::arg("V"));
-
-    m.def("csr_matvec",
-        [](const ci::FixedBasisCSR& A,
-        py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> x)
-        {
-            if ((size_t)x.size() != A.N) throw std::runtime_error("x has wrong length");
-            py::array_t<std::complex<double>> y(A.N);
-            ci::csr_matvec(A,
-                reinterpret_cast<const cx*>(x.data()),
-                reinterpret_cast<cx*>(y.mutable_data()));
-            return y;
-        },
-        py::arg("A"), py::arg("x"));
-
-
-    m.def("build_fixed_basis_csr_full",
-    [](const std::vector<ci::SlaterDeterminant>& basis,
-       size_t M,
-       py::array H,
-       py::array V,
-       double tol_tables,
-       double drop_tol)
-    {
-        return ci::build_fixed_basis_csr_full(
-            basis, M, make_H1(H), make_ERI(V), tol_tables, drop_tol
-        );
-    },
-    py::arg("basis"),
-    py::arg("M"),
-    py::arg("H"),
-    py::arg("V"),
-    py::arg("tol_tables") = 1e-12,
-    py::arg("drop_tol")   = 0.0,
-    R"doc(
-    Build the projected Hamiltonian on a fixed determinant basis as a CSR matrix.
-
-    Steps:
-      1) build_screened_hamiltonian(2*M, H, V, tol_tables)
-      2) build_fixed_basis_tables(...)
-      3) build_fixed_basis_csr(...)
-
-    Returns a FixedBasisCSR with (indptr, indices, data).
-    Optionally prunes |Hij| <= drop_tol after compression.
-    )doc");
-
-
-    // Matvec build openmp:
-    py::class_<ci::FixedBasisMatvec>(m, "FixedBasisMatvec")
-        .def(py::init([](const std::vector<ci::SlaterDeterminant>& basis,
-                      py::array H, py::array V,
-                      bool enable_magnetic, double tol) {
-                auto H1  = make_H1(H);
-                auto ERI = make_ERI(V);
-                return ci::FixedBasisMatvec(basis, H1, ERI, enable_magnetic, tol);
-            }),
-            py::arg("basis"), py::arg("H"), py::arg("V"),
-            py::arg("enable_magnetic") = false, py::arg("tol") = 0.0,
-            py::keep_alive<1, 2>(),   // Hop keeps H alive
-            py::keep_alive<1, 3>())   // keep V alive
-        .def("size", &ci::FixedBasisMatvec::size)
-        .def("apply",
-             [](const ci::FixedBasisMatvec& op,
-                py::array_t<std::complex<double>,
-                            py::array::c_style | py::array::forcecast> x) {
-                 if ((std::size_t)x.size() != op.size())
-                     throw std::runtime_error("x has wrong length");
-                 py::array_t<std::complex<double>> y(op.size());
-                 {
-                     py::gil_scoped_release nogil;
-                     op.apply(reinterpret_cast<const std::complex<double>*>(x.data()),
-                              reinterpret_cast<std::complex<double>*>(y.mutable_data()));
-                 }
-                 return y;
-             });
 
 
     // --- ED Tools & Hamiltonian Construction ---

@@ -16,7 +16,10 @@ endif()
 # --- 1. Define the pure C++ core library (no Python bindings) ---
 # This is good practice. It separates your C++ logic from the binding code.
 add_library(clic_core STATIC
-  cpp_src/ci_core.cpp
+#  cpp_src/ci_core.cpp
+  cpp_src/determinants.cpp 
+  cpp_src/wavefunction.cpp
+  cpp_src/nbody.cpp
   cpp_src/slater_condon.cpp
   cpp_src/hamiltonian.cpp
   cpp_src/ed_tools.cpp

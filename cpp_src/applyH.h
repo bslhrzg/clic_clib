@@ -1,7 +1,9 @@
 // cpp_src/applyH.h
 #pragma once
 
-#include "ci_core.h"
+//#include "ci_core.h"
+#include "determinants.h"
+#include "wavefunction.h"
 #include "slater_condon.h"
 #include <unordered_map>
 #include <vector>
@@ -32,13 +34,19 @@ ScreenedHamiltonian build_screened_hamiltonian(
     size_t K, const H1View& H, const ERIView& V, double tol
 );
 
-// Apply the screened Hamiltonian to a wavefunction, exactly mirroring the Python logic.
+// Apply the screened Hamiltonian to a wavefunction
 Wavefunction apply_hamiltonian(
     const Wavefunction& psi,
     const ScreenedHamiltonian& screened_H,
     const H1View& H,
     const ERIView& V,
     double tol_element
+);
+
+// Same logic to get the connected basis only
+std::vector<SlaterDeterminant> get_connected_basis(
+    const Wavefunction& psi,
+    const ScreenedHamiltonian& sh
 );
 
 // -------- Fixed basis variant --------
@@ -65,36 +73,5 @@ Wavefunction apply_hamiltonian_fixed_basis(
     double tol_element
 );
 
-
-// ---- Fixed-basis CSR matrix ----
-struct FixedBasisCSR {
-    size_t N = 0;                         // basis size
-    std::vector<int64_t> indptr;          // length N+1
-    std::vector<int32_t> indices;         // column indices
-    std::vector<cx>      data;            // values (Hermitian)
-};
-
-// Build H_proj in CSR over the fixed basis using filtered tables
-FixedBasisCSR build_fixed_basis_csr(
-    const ScreenedHamiltonian& sh_fb,
-    const std::vector<SlaterDeterminant>& basis,
-    const H1View& H,
-    const ERIView& V);
-
-// y = Hx for the CSR (no Wavefunction, no hashing)
-void csr_matvec(const FixedBasisCSR& A, const cx* x, cx* y);
-
-// Full H as a sparse CSR 
-// Build the full projected Hamiltonian H|basis⟩⟨basis| in CSR in one call.
-// Internally: build_screened_hamiltonian(K,H,V,tol_tables) -> build_fixed_basis_tables -> build_fixed_basis_csr.
-// drop_tol: optional post-compression pruning; values with |Hij| <= drop_tol are removed.
-FixedBasisCSR build_fixed_basis_csr_full(
-    const std::vector<SlaterDeterminant>& basis,
-    size_t M,
-    const H1View& H,
-    const ERIView& V,
-    double tol_tables,
-    double drop_tol = 0.0);
-    
 
 } // namespace ci

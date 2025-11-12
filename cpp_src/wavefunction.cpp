@@ -7,31 +7,10 @@
 namespace ci {
 
 // ================================ Wavefunction ===============================
+
 Wavefunction::Wavefunction(std::size_t n_spatial) : n_spatial_(n_spatial) {}
 Wavefunction::Wavefunction(std::size_t n_spatial, const Data& init)
     : n_spatial_(n_spatial), data_(init) {}
-
-Wavefunction::Wavefunction(std::size_t n_spatial, 
-    const std::vector<SlaterDeterminant>& basis, 
-    const std::vector<Coeff>& coeffs,
-    bool keep_zeros)
-    : n_spatial_(n_spatial)
-{
-    if (basis.size() != coeffs.size()) {
-        throw std::invalid_argument("Basis and coefficients vectors must have the same size.");
-    }
-    data_.reserve(basis.size());
-
-    if (keep_zeros) {
-        for (size_t i = 0; i < basis.size(); ++i) {
-            data_[basis[i]] = coeffs[i];
-        }
-    } else {
-        for (size_t i = 0; i < basis.size(); ++i) {
-            add_term(basis[i], coeffs[i], 0.0);
-        }
-    }
-}
 
 std::size_t Wavefunction::num_spatial_orbitals() const noexcept { return n_spatial_; }
 const Wavefunction::Data& Wavefunction::data() const noexcept { return data_; }
@@ -41,6 +20,30 @@ void Wavefunction::add_term(const SlaterDeterminant& det, Coeff c, double tol) {
     auto& v = data_[det];
     v += c;
     if (std::abs(v) < tol) data_.erase(det);
+}
+
+Wavefunction::Wavefunction(std::size_t n_spatial,
+    const std::vector<SlaterDeterminant>& basis,
+    const std::vector<Coeff>& coeffs,
+    bool keep_zeros) // New parameter
+    : n_spatial_(n_spatial)
+{
+    if (basis.size() != coeffs.size()) {
+        throw std::invalid_argument("Basis and coefficients vectors must have the same size.");
+    }
+    data_.reserve(basis.size());
+
+    if (keep_zeros) {
+        // Direct insertion: Keep all terms, including zeros.
+        for (size_t i = 0; i < basis.size(); ++i) {
+            data_[basis[i]] = coeffs[i];
+        }
+    } else {
+        // Default behavior: Prune zero-coefficient terms on creation.
+        for (size_t i = 0; i < basis.size(); ++i) {
+            add_term(basis[i], coeffs[i], 0);
+        }
+    }
 }
 
 void Wavefunction::normalize(double tol) {
@@ -74,12 +77,37 @@ Wavefunction::coeffs_sorted(const std::vector<SlaterDeterminant>& basis) const {
     return c;
 }
 
+Wavefunction apply_creation(const Wavefunction& wf, std::size_t i0, Spin spin,
+                            SpinOrbitalOrder order)
+{
+    Wavefunction out(wf.num_spatial_orbitals());
+    for (const auto& [det, coeff] : wf.data()) {
+        auto r = SlaterDeterminant::create(det, i0, spin, order);
+        if (!r) continue;
+        out.add_term(r->det, coeff * static_cast<double>(r->sign));
+    }
+    return out;
+}
+
+Wavefunction apply_annihilation(const Wavefunction& wf, std::size_t i0, Spin spin,
+                                SpinOrbitalOrder order)
+{
+    Wavefunction out(wf.num_spatial_orbitals());
+    for (const auto& [det, coeff] : wf.data()) {
+        auto r = SlaterDeterminant::annihilate(det, i0, spin, order);
+        if (!r) continue;
+        out.add_term(r->det, coeff * static_cast<double>(r->sign));
+    }
+    return out;
+}
+
 Wavefunction::Coeff Wavefunction::dot(const Wavefunction& other) const {
     if (n_spatial_ != other.n_spatial_) {
         throw std::invalid_argument("Wavefunctions must have the same number of spatial orbitals for dot product.");
     }
 
     Coeff result = {0.0, 0.0};
+    // Iterate over the smaller of the two maps for efficiency
     const auto& map_a = (data_.size() < other.data_.size()) ? data_ : other.data_;
     const auto& map_b = (data_.size() < other.data_.size()) ? other.data_ : data_;
 
@@ -101,5 +129,6 @@ void Wavefunction::add_wavefunction(const Wavefunction& other, Coeff scale) {
         add_term(det, coeff * scale);
     }
 }
+
 
 } // namespace ci
