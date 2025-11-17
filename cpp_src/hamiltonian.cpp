@@ -10,6 +10,8 @@
 
 // Note: We keep AlphaFirst ordering consistently.
 
+
+
 namespace ci {
 
 // -------------------------- utilities: hashing & keys ------------------------
@@ -649,6 +651,8 @@ CSR build_hamiltonian_naive(const std::vector<SlaterDeterminant>& basis,
 
     return coo_to_csr(N, N, std::move(all));
 }
+
+
 
 
 } // namespace ci

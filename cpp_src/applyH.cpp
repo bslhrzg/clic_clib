@@ -1,5 +1,6 @@
 // cpp_src/applyH.cpp
 #include "applyH.h"
+#include "hamiltonian.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -10,9 +11,10 @@
 #include <vector>
 
 
+
+
 namespace ci {
 
-// This function was previously local to hamiltonian.cpp. We need it here as well.
 static inline Determinant combined_from(const SlaterDeterminant& sd) {
     const size_t M = sd.num_spatial_orbitals();
     Determinant D(2 * M);
@@ -24,11 +26,10 @@ static inline Determinant combined_from(const SlaterDeterminant& sd) {
 }
 
 
-// Direct C++ translation of your Python `build_*` functions
-ScreenedHamiltonian build_screened_hamiltonian(
+HamiltonianTables build_hamiltonian_tables(
     size_t K, const H1View& H, const ERIView& V, double tol)
 {
-    ScreenedHamiltonian sh;
+    HamiltonianTables sh;
     sh.n_spin_orbitals = K;
 
     // --- TableSh0 (build_Sh0) ---
@@ -51,7 +52,6 @@ ScreenedHamiltonian build_screened_hamiltonian(
             if (i == j) continue;
             std::vector<uint32_t> spectators;
             for (uint32_t p = 0; p < K; ++p) {
-                // Exact translation of the 4 terms checked in your Python `build_SU`
                 if (std::abs(V(j, p, p, i)) > tol ||
                     std::abs(V(j, p, i, p)) > tol ||
                     std::abs(V(p, j, p, i)) > tol ||
@@ -73,7 +73,6 @@ ScreenedHamiltonian build_screened_hamiltonian(
             for (uint32_t k = 0; k < K; ++k) {
                 for (uint32_t l = 0; l < K; ++l) {
                     if (k == l || k == i || k == j || l == i || l == j) continue;
-                    // Exact translation of the 4 terms checked in your Python `build_D`
                     if (std::abs(V(k, l, i, j)) > tol ||
                         std::abs(V(l, k, i, j)) > tol ||
                         std::abs(V(k, l, j, i)) > tol ||
@@ -93,7 +92,7 @@ ScreenedHamiltonian build_screened_hamiltonian(
 
 Wavefunction apply_hamiltonian(
     const Wavefunction& psi,
-    const ScreenedHamiltonian& sh,
+    const HamiltonianTables& sh,
     const H1View& H,
     const ERIView& V,
     double tol_element)
@@ -246,7 +245,7 @@ Wavefunction apply_hamiltonian(
 
 std::vector<SlaterDeterminant> get_connected_basis(
     const Wavefunction& psi,
-    const ScreenedHamiltonian& sh)
+    const HamiltonianTables& sh)
 {
     // We only need a set to store the unique determinants we find.
     using Set = std::unordered_set<SlaterDeterminant>;
@@ -411,15 +410,15 @@ static AllowedSets collect_allowed_from_basis(const std::vector<SlaterDeterminan
     return A;
 }
 
-ScreenedHamiltonian build_fixed_basis_tables(
-    const ScreenedHamiltonian& sh_full,
+HamiltonianTables build_fixed_basis_tables(
+    const HamiltonianTables& sh_full,
     const std::vector<SlaterDeterminant>& basis,
     size_t M)
 {
     const auto A = collect_allowed_from_basis(basis, M);
     const uint32_t K = static_cast<uint32_t>(2 * M);
 
-    ScreenedHamiltonian sh_fb;
+    HamiltonianTables sh_fb;
     sh_fb.n_spin_orbitals = sh_full.n_spin_orbitals;
 
     // sh0
@@ -467,7 +466,7 @@ ScreenedHamiltonian build_fixed_basis_tables(
 
 Wavefunction apply_hamiltonian_fixed_basis(
     const Wavefunction& psi,
-    const ScreenedHamiltonian& sh_fixed_basis,
+    const HamiltonianTables& sh_fixed_basis,
     const std::vector<SlaterDeterminant>& basis,
     const H1View& H,
     const ERIView& V,
@@ -623,6 +622,280 @@ Wavefunction apply_hamiltonian_fixed_basis(
     for (const auto& kv : final_acc) out.add_term(kv.first, kv.second, tol_element);
     return out;
 }
+
+
+namespace {
+
+// Local COO helper, same layout as in build_hamiltonian_openmp
+struct COO {
+    std::vector<int32_t> row;
+    std::vector<int32_t> col;
+    std::vector<cx>      val;
+
+    void push(int32_t r, int32_t c, cx v, double tol) {
+        if (std::abs(v) < tol) return;
+        row.push_back(r);
+        col.push_back(c);
+        val.push_back(v);
+    }
+};
+
+static CSR coo_to_csr(std::size_t N, std::size_t M, COO&& coo) {
+    CSR out;
+    out.n_rows = N;
+    out.n_cols = M;
+    out.indptr.assign(N + 1, 0);
+
+    const std::size_t nnz = coo.val.size();
+    // count per row
+    for (std::size_t e = 0; e < nnz; ++e) {
+        ++out.indptr[static_cast<std::size_t>(coo.row[e]) + 1];
+    }
+    // prefix sum
+    for (std::size_t i = 0; i < N; ++i) out.indptr[i + 1] += out.indptr[i];
+
+    out.indices.resize(nnz);
+    out.data.resize(nnz);
+
+    // cursors
+    std::vector<int64_t> cursor = out.indptr;
+
+    for (std::size_t e = 0; e < nnz; ++e) {
+        const int32_t r  = coo.row[e];
+        const int64_t pos = cursor[static_cast<std::size_t>(r)]++;
+        out.indices[static_cast<std::size_t>(pos)] = coo.col[e];
+        out.data   [static_cast<std::size_t>(pos)] = coo.val[e];
+    }
+
+    // no sorting/summing; we generate each (i,j) once
+
+    return out;
+}
+
+} // anonymous namespace
+
+CSR build_hamiltonian_matrix_fixed_basis(
+    const HamiltonianTables& sh_fixed_basis,
+    const std::vector<SlaterDeterminant>& basis,
+    const H1View& H,
+    const ERIView& V,
+    double tol_element)
+{
+    const std::size_t dim = basis.size();
+    if (dim == 0) {
+        COO empty;
+        return coo_to_csr(0, 0, std::move(empty));
+    }
+
+    const std::size_t M = basis.front().num_spatial_orbitals();
+    const std::size_t K = sh_fixed_basis.n_spin_orbitals;
+
+    // determinant -> basis index
+    std::unordered_map<SlaterDeterminant, std::size_t> index_map;
+    index_map.reserve(dim * 2);
+    for (std::size_t i = 0; i < dim; ++i) {
+        index_map.emplace(basis[i], i);
+    }
+
+    int T = 1;
+#ifdef _OPENMP
+    T = omp_get_max_threads();
+#endif
+    std::vector<COO> local_coo(T);
+
+#pragma omp parallel for schedule(dynamic)
+    for (std::int64_t i64 = 0; i64 < static_cast<std::int64_t>(dim); ++i64) {
+        int tid = 0;
+#ifdef _OPENMP
+        tid = omp_get_thread_num();
+#endif
+        COO& coo = local_coo[tid];
+
+        const std::size_t i = static_cast<std::size_t>(i64);
+        const SlaterDeterminant& det_in = basis[i];
+
+        // spin-orbital occupations
+        std::vector<int> occ_so_vec;
+        occ_so_vec.reserve(K);
+        for (auto it = det_in.alpha().begin_occ(); it != det_in.alpha().end_occ(); ++it)
+            occ_so_vec.push_back(*it);
+        for (auto it = det_in.beta().begin_occ(); it != det_in.beta().end_occ(); ++it)
+            occ_so_vec.push_back(*it + static_cast<int>(M));
+        std::sort(occ_so_vec.begin(), occ_so_vec.end());
+        std::unordered_set<int> occ_so_set(occ_so_vec.begin(), occ_so_vec.end());
+
+        Determinant d_in_comb(K, occ_so_vec);
+        SlaterDeterminant det_out_scratch(M);
+        int8_t sign = 1;
+
+        // Avoid generating the same det_out multiple times from this det_in
+        std::unordered_set<SlaterDeterminant> seen;
+        seen.reserve(64);
+        seen.insert(det_in);
+
+        // 1) diagonal
+        {
+            cx val_diag = KL(d_in_comb, d_in_comb, H, V);
+            if (std::abs(val_diag) >= tol_element) {
+                coo.push(static_cast<int32_t>(i),
+                         static_cast<int32_t>(i),
+                         val_diag, 0.0); // already thresholded
+            }
+        }
+
+        // 2) singles from sh0
+        for (int r : occ_so_vec) {
+            auto it = sh_fixed_basis.sh0.find(static_cast<uint32_t>(r));
+            if (it == sh_fixed_basis.sh0.end()) continue;
+
+            for (uint32_t p : it->second) {
+                if (occ_so_set.count(static_cast<int>(p))) continue;
+
+                if (SlaterDeterminant::apply_excitation_single_fast(
+                        det_in, p % M, r % M,
+                        p < M ? Spin::Alpha : Spin::Beta,
+                        r < M ? Spin::Alpha : Spin::Beta,
+                        det_out_scratch, sign))
+                {
+                    auto it_idx = index_map.find(det_out_scratch);
+                    if (it_idx == index_map.end()) continue;
+                    const std::size_t j = it_idx->second;
+                    if (j < i) continue; // generate only upper triangle
+
+                    if (seen.count(det_out_scratch)) continue;
+                    seen.insert(det_out_scratch);
+
+                    Determinant d_out_comb = combined_from(det_out_scratch);
+                    cx val = KL(d_in_comb, d_out_comb, H, V);
+                    if (std::abs(val) < tol_element) continue;
+
+                    coo.push(static_cast<int32_t>(i),
+                             static_cast<int32_t>(j),
+                             val, 0.0);
+                    if (j != i) {
+                        coo.push(static_cast<int32_t>(j),
+                                 static_cast<int32_t>(i),
+                                 std::conj(val), 0.0);
+                    }
+                }
+            }
+        }
+
+        // 3) singles from su
+        for (int r : occ_so_vec) {
+            auto it_r = sh_fixed_basis.su.find(static_cast<uint32_t>(r));
+            if (it_r == sh_fixed_basis.su.end()) continue;
+
+            for (const auto& [p, spectators] : it_r->second) {
+                if (occ_so_set.count(static_cast<int>(p))) continue;
+
+                bool ok = false;
+                for (uint32_t s : spectators) {
+                    if (occ_so_set.count(static_cast<int>(s))) { ok = true; break; }
+                }
+                if (!ok) continue;
+
+                if (SlaterDeterminant::apply_excitation_single_fast(
+                        det_in, p % M, r % M,
+                        p < M ? Spin::Alpha : Spin::Beta,
+                        r < M ? Spin::Alpha : Spin::Beta,
+                        det_out_scratch, sign))
+                {
+                    auto it_idx = index_map.find(det_out_scratch);
+                    if (it_idx == index_map.end()) continue;
+                    const std::size_t j = it_idx->second;
+                    if (j < i) continue;
+
+                    if (seen.count(det_out_scratch)) continue;
+                    seen.insert(det_out_scratch);
+
+                    Determinant d_out_comb = combined_from(det_out_scratch);
+                    cx val = KL(d_in_comb, d_out_comb, H, V);
+                    if (std::abs(val) < tol_element) continue;
+
+                    coo.push(static_cast<int32_t>(i),
+                             static_cast<int32_t>(j),
+                             val, 0.0);
+                    if (j != i) {
+                        coo.push(static_cast<int32_t>(j),
+                                 static_cast<int32_t>(i),
+                                 std::conj(val), 0.0);
+                    }
+                }
+            }
+        }
+
+        // 4) doubles from d
+        for (std::size_t a = 0; a < occ_so_vec.size(); ++a) {
+            for (std::size_t b = a + 1; b < occ_so_vec.size(); ++b) {
+                uint32_t r = static_cast<uint32_t>(occ_so_vec[a]);
+                uint32_t s = static_cast<uint32_t>(occ_so_vec[b]);
+                uint64_t key_rs = r | (static_cast<uint64_t>(s) << 32);
+
+                auto it = sh_fixed_basis.d.find(key_rs);
+                if (it == sh_fixed_basis.d.end()) continue;
+
+                for (const auto& [p, q] : it->second) {
+                    if (occ_so_set.count(static_cast<int>(p)) ||
+                        occ_so_set.count(static_cast<int>(q))) continue;
+
+                    if (SlaterDeterminant::apply_excitation_double_fast(
+                            det_in, p % M, q % M, r % M, s % M,
+                            p < M ? Spin::Alpha : Spin::Beta,
+                            q < M ? Spin::Alpha : Spin::Beta,
+                            r < M ? Spin::Alpha : Spin::Beta,
+                            s < M ? Spin::Alpha : Spin::Beta,
+                            det_out_scratch, sign))
+                    {
+                        auto it_idx = index_map.find(det_out_scratch);
+                        if (it_idx == index_map.end()) continue;
+                        const std::size_t j = it_idx->second;
+                        if (j < i) continue;
+
+                        if (seen.count(det_out_scratch)) continue;
+                        seen.insert(det_out_scratch);
+
+                        Determinant d_out_comb = combined_from(det_out_scratch);
+                        cx val = KL(d_in_comb, d_out_comb, H, V);
+                        if (std::abs(val) < tol_element) continue;
+
+                        coo.push(static_cast<int32_t>(i),
+                                 static_cast<int32_t>(j),
+                                 val, 0.0);
+                        if (j != i) {
+                            coo.push(static_cast<int32_t>(j),
+                                     static_cast<int32_t>(i),
+                                     std::conj(val), 0.0);
+                        }
+                    }
+                }
+            }
+        }
+    } // omp parallel for
+
+    // merge COOs
+    COO global;
+    std::size_t total_nnz = 0;
+    for (const auto& c : local_coo) total_nnz += c.val.size();
+    global.row.reserve(total_nnz);
+    global.col.reserve(total_nnz);
+    global.val.reserve(total_nnz);
+
+    for (auto& c : local_coo) {
+        global.row.insert(global.row.end(),
+                          std::make_move_iterator(c.row.begin()),
+                          std::make_move_iterator(c.row.end()));
+        global.col.insert(global.col.end(),
+                          std::make_move_iterator(c.col.begin()),
+                          std::make_move_iterator(c.col.end()));
+        global.val.insert(global.val.end(),
+                          std::make_move_iterator(c.val.begin()),
+                          std::make_move_iterator(c.val.end()));
+    }
+
+    return coo_to_csr(dim, dim, std::move(global));
+}
+
 
 
 } // namespace ci

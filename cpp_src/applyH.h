@@ -5,11 +5,18 @@
 #include "determinants.h"
 #include "wavefunction.h"
 #include "slater_condon.h"
+#include "hamiltonian.h"
 #include <unordered_map>
 #include <vector>
 #include <cstdint>
 
+
+
+
 namespace ci {
+
+struct CSR;
+
 
 // Corresponds to Python's Sh0: map from annihilated orbital `r` to created orbitals `p`.
 using TableSh0 = std::unordered_map<uint32_t, std::vector<uint32_t>>;
@@ -22,7 +29,7 @@ using TableSU = std::unordered_map<uint32_t, std::unordered_map<uint32_t, std::v
 // Value: p | (q << 32).
 using TableD = std::unordered_map<uint64_t, std::vector<std::pair<uint32_t, uint32_t>>>;
 
-struct ScreenedHamiltonian {
+struct HamiltonianTables {
     size_t n_spin_orbitals = 0;
     TableSh0 sh0;
     TableSU su;
@@ -30,14 +37,14 @@ struct ScreenedHamiltonian {
 };
 
 // Build the screening tables from integral views.
-ScreenedHamiltonian build_screened_hamiltonian(
+HamiltonianTables build_hamiltonian_tables(
     size_t K, const H1View& H, const ERIView& V, double tol
 );
 
 // Apply the screened Hamiltonian to a wavefunction
 Wavefunction apply_hamiltonian(
     const Wavefunction& psi,
-    const ScreenedHamiltonian& screened_H,
+    const HamiltonianTables& screened_H,
     const H1View& H,
     const ERIView& V,
     double tol_element
@@ -46,7 +53,7 @@ Wavefunction apply_hamiltonian(
 // Same logic to get the connected basis only
 std::vector<SlaterDeterminant> get_connected_basis(
     const Wavefunction& psi,
-    const ScreenedHamiltonian& sh
+    const HamiltonianTables& sh
 );
 
 // -------- Fixed basis variant --------
@@ -55,8 +62,8 @@ std::vector<SlaterDeterminant> get_connected_basis(
 // The filter keeps only indices that belong to the union of occupied spatial orbitals
 // present anywhere in `basis` (lifted to both spins).
 // `M` is the number of spatial orbitals for the determinants in `basis`.
-ScreenedHamiltonian build_fixed_basis_tables(
-    const ScreenedHamiltonian& sh_full,
+HamiltonianTables build_fixed_basis_tables(
+    const HamiltonianTables& sh_full,
     const std::vector<SlaterDeterminant>& basis,
     size_t M
 );
@@ -66,12 +73,19 @@ ScreenedHamiltonian build_fixed_basis_tables(
 // `sh_fixed_basis` are considered.
 Wavefunction apply_hamiltonian_fixed_basis(
     const Wavefunction& psi,
-    const ScreenedHamiltonian& sh_fixed_basis,
+    const HamiltonianTables& sh_fixed_basis,
     const std::vector<SlaterDeterminant>& basis,
     const H1View& H,
     const ERIView& V,
     double tol_element
 );
+
+CSR build_hamiltonian_matrix_fixed_basis(
+    const HamiltonianTables& sh_fixed_basis,
+    const std::vector<SlaterDeterminant>& basis,
+    const H1View& H,
+    const ERIView& V,
+    double tol_element);
 
 
 } // namespace ci

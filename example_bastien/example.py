@@ -32,6 +32,7 @@ U_ = np.ascontiguousarray(U_.transpose(0,2,1,3))
 h0 = cc.double_h(h0_,M)
 U = cc.umo2so(U_,M)
 
+# Without this nothing works
 h0 = np.ascontiguousarray(h0, dtype=np.complex128)
 U = np.ascontiguousarray(U, dtype=np.complex128)
 #####################################################

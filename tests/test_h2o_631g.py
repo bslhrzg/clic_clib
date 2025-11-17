@@ -51,7 +51,7 @@ def test_h2o_iterative_ci():
 
     psi = Wavefunction(M,current_basis,[1.0])
     toltables = 1e-12
-    tables = build_screened_hamiltonian(h0_clean,U_clean,toltables)
+    tables = build_hamiltonian_tables(h0_clean,U_clean,toltables)
     
     for level in ["HF", "CISD", "CISDTQ"]:
         print(f"\n--- Calculating {level} Energy ---")

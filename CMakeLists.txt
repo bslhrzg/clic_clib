@@ -32,7 +32,17 @@ target_include_directories(clic_core PUBLIC
 
 # --- 2. Define the pybind11 extension module ---
 # It only contains the binding code itself.
-pybind11_add_module(clic_clib bindings/bindings.cpp)
+#pybind11_add_module(clic_clib bindings/bindings.cpp)
+
+pybind11_add_module(clic_clib
+    bindings/bindings.cpp
+    bindings/bind_common.hpp       
+    bindings/bind_determinants.cpp
+    bindings/bind_wavefunction.cpp
+    bindings/bind_nbody.cpp
+    bindings/bind_tables.cpp
+    bindings/bind_ed.cpp
+)
 
 # --- 3. Link the C++ core library to the Python module ---
 target_link_libraries(clic_clib PRIVATE clic_core)

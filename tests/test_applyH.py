@@ -65,7 +65,7 @@ def test_h2o_fci_energy():
 
     maxiter=600
     toltables = 0
-    tables = qc.build_screened_hamiltonian(h0_alphafirst,U_alphafirst,toltables)
+    tables = qc.build_hamiltonian_tables(h0_alphafirst,U_alphafirst,toltables)
     tol_el = 0
     tol_prune = 0
     for _ in range(maxiter) :
