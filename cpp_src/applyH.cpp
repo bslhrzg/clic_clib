@@ -735,7 +735,9 @@ CSR build_hamiltonian_matrix_fixed_basis(
 
         // 1) diagonal
         {
-            cx val_diag = KL(d_in_comb, d_in_comb, H, V);
+            // cx val_diag = KL(d_in_comb, d_in_comb, H, V);
+            cx val_diag = OO(H, V, occ_so_vec);
+
             if (std::abs(val_diag) >= tol_element) {
                 coo.push(static_cast<int32_t>(i),
                          static_cast<int32_t>(i),
@@ -765,8 +767,12 @@ CSR build_hamiltonian_matrix_fixed_basis(
                     if (seen.count(det_out_scratch)) continue;
                     seen.insert(det_out_scratch);
 
-                    Determinant d_out_comb = combined_from(det_out_scratch);
-                    cx val = KL(d_in_comb, d_out_comb, H, V);
+                    //Determinant d_out_comb = combined_from(det_out_scratch);
+                    //cx val = KL(d_in_comb, d_out_comb, H, V);
+
+                    cx kernel = OS(H, V, r, p, occ_so_vec);
+                    cx val    = static_cast<double>(sign) * kernel;
+
                     if (std::abs(val) < tol_element) continue;
 
                     coo.push(static_cast<int32_t>(i),
@@ -809,8 +815,12 @@ CSR build_hamiltonian_matrix_fixed_basis(
                     if (seen.count(det_out_scratch)) continue;
                     seen.insert(det_out_scratch);
 
-                    Determinant d_out_comb = combined_from(det_out_scratch);
-                    cx val = KL(d_in_comb, d_out_comb, H, V);
+                    //Determinant d_out_comb = combined_from(det_out_scratch);
+                    //cx val = KL(d_in_comb, d_out_comb, H, V);
+                    
+                    cx kernel = OS(H, V, r, p, occ_so_vec);
+                    cx val    = static_cast<double>(sign) * kernel;
+
                     if (std::abs(val) < tol_element) continue;
 
                     coo.push(static_cast<int32_t>(i),
@@ -855,8 +865,10 @@ CSR build_hamiltonian_matrix_fixed_basis(
                         if (seen.count(det_out_scratch)) continue;
                         seen.insert(det_out_scratch);
 
-                        Determinant d_out_comb = combined_from(det_out_scratch);
-                        cx val = KL(d_in_comb, d_out_comb, H, V);
+                        //Determinant d_out_comb = combined_from(det_out_scratch);
+                        //cx val = KL(d_in_comb, d_out_comb, H, V);
+                        cx kernel = OD(V, r, s, p, q);
+                        cx val    = static_cast<double>(sign) * kernel;
                         if (std::abs(val) < tol_element) continue;
 
                         coo.push(static_cast<int32_t>(i),

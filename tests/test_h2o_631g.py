@@ -46,6 +46,10 @@ def test_h2o_iterative_ci():
         "CISDTQ": -76.12236,
     }
 
+    toltables = 0
+    tables = build_hamiltonian_tables(h0_clean,U_clean,toltables)
+    tol_el = 0
+
     # --- Iteration Loop ---
     current_basis = sorted([hf_det])
 
@@ -75,7 +79,11 @@ def test_h2o_iterative_ci():
 
         print(f"Building {level} Hamiltonian ({len(current_basis)}x{len(current_basis)})...")
         t_start = time.time()
-        H_sparse = build_hamiltonian_openmp(current_basis, h0_clean, U_clean)
+        #H_sparse = build_hamiltonian_openmp(current_basis, h0_clean, U_clean)
+        ftables = build_fixed_basis_tables(tables,current_basis,M)
+        H_sparse = build_hamiltonian_matrix_fixed_basis(
+        ftables, current_basis, h0_clean, U_clean, 1e-16
+        )
         t_end = time.time()
         print(f"  Hamiltonian built in {t_end - t_start:.2f}s")
         
